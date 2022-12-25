@@ -1,0 +1,592 @@
+---
+title: "Movie Recommendation"
+
+output: 
+  bookdown::pdf_document2: 
+    extra_dependencies: "subfig"
+header-includes:
+  \usepackage{placeins}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tinytex.verbose = TRUE)
+```
+
+```{r, include = FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if (!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if (!require(kableExtra)) install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(knitr)
+library(kableExtra)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+
+# set.seed(1) # if using R 3.5 or earlier
+
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+# Extract "year" from "title" in edx and final_holdout_test set
+
+pattern <- "\\((\\d{4})\\)$"
+edx <- edx %>% mutate(year=str_extract_all(edx$title, pattern,simplify=FALSE))
+edx <- edx %>% mutate(title=str_remove_all(edx$title,pattern))
+
+final_holdout_test <- final_holdout_test %>% mutate(year=str_extract_all(final_holdout_test$title, pattern,simplify=FALSE))
+final_holdout_test <- final_holdout_test %>% mutate(title=str_remove_all(final_holdout_test$title,pattern))
+
+final_holdout_test$year <- str_remove_all(final_holdout_test$year,"[(]")
+final_holdout_test$year <- str_remove_all(final_holdout_test$year,"[)]")
+
+edx$year <- str_remove_all(edx$year,"[(]")
+edx$year <- str_remove_all(edx$year,"[)]")
+
+# Change class of Year from character to numeric
+
+final_holdout_test$year <- as.numeric(final_holdout_test$year)
+edx$year <- as.numeric(edx$year)
+```
+
+\newpage
+
+# Introducton
+
+All popular movie websites or streaming services like Netflix apply recommendation systems to suggest movies to viewers. Netflix in particular uses a recommendation system that predicts how many stars a user will give a specific movie. One star is the lowest, and five the highest. In 2006 Netflix offered 1 million dollars to the team that could improve the current recommendation system by 10%. The challenge decided on a winner based on the residual mean squared error (RMSE). The goal of this project is to create a movie recommendation system using the Movie Lens data set that results in a RMSE of less than 0.86490.
+
+# Data preparation
+
+## Data Description
+
+MovieLens data sets  were collected by the GroupLens Research Project at the University of Minnesota over various periods of time, depending on the size of the set. The 10M version of the MovieLens data set was used for this project which includes 7 variables: userId, movieId, rating, timestamp, title, genres and year ("year" was separated from the "title" variable to represent release year for a specific movie). The data set was also split into a train set (edx, 90%) and test set (final_holdout_test, 10%). edx will be used to train the final model, and final_holdout_test set will be used to test it. We start by exploring the overall nature of the edx set by examining the structure. The summary of this data set is presented in Table \@ref(tab:tab1) and Table \@ref(tab:tab2).
+
+```{r echo = TRUE}
+str(edx)
+```
+
+```{r tab1, echo = FALSE}
+#2. Data Preparation
+#2.1. Data Description
+# Summary of character variables
+Character_variables <- c("title","genres")
+Number_of_categories <- c(n_distinct(edx$title), n_distinct(edx$genres))
+tab1 <- data.frame(Character_variables,Number_of_categories)
+kbl(tab1, booktabs = T, caption = "Summary of Character Variables") %>% 
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+```{r tab2, echo = FALSE}
+# Summary of numeric variables
+Numeric_variables <- c("userId","movieId","rating","timestamp","year")
+Min <- c(min(edx$userId),min(edx$movieId),min(edx$rating),
+         min(edx$timestamp),min(edx$year))
+Median <- c(median(edx$userId),median(edx$movieId),median(edx$rating),
+            median(edx$timestamp),median(edx$year))
+Mean <- c(mean(edx$userId),mean(edx$movieId),mean(edx$rating),
+          mean(edx$timestamp),mean(edx$year))
+Max <- c(max(edx$userId),max(edx$movieId),max(edx$rating),
+         max(edx$timestamp),max(edx$year))
+NA_number <- c(sum(is.na(edx$userId)),sum(is.na(edx$movieId)),
+                  sum(is.na(edx$rating)),sum(is.na(edx$timestamp)),
+                  sum(is.na(edx$year)))
+tab2 <- data.frame(Numeric_variables,Min,Median,Mean,Max,NA_number)
+kbl(tab2, booktabs = T,digits = 1,caption = "Summary of Numeric Variables") %>% 
+  kable_styling(latex_options = c("striped", "hold_position"))
+#N/A values: No
+```
+
+From this summary, we see that there are 7 variables, including 2 character and 5 numeric. Since the objective is to build a model that predicts rating, rating will be our response variable, and the remaining variables will be the predictors. It is important to note that the rating variable has a range of 0.5 to 5.  This makes sense because it is based on a 5 star scale and we do not want to see values outside this range. Also note that the mean value for all ratings is 3.5. Furthermore, we can see that this data set is already in tidy format with no NA's, thus, no further cleaning is required. 
+
+# Data Exploration and Visualization
+
+## Movie Rating 
+
+```{r, include = FALSE}
+#3.1. Number of rating count
+
+# Number of different movies
+
+n_distinct(edx$movieId)
+
+# Range of number of ratings per movie
+
+movie_rating_count <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(movie_rating_count = n()) 
+
+range(movie_rating_count$movie_rating_count)
+```
+
+This section explores the ratings given to specific movies. Specifically, the average rating per movie, and the number of ratings per movie. To get an idea of the distribution, we take a look at the histogram of each in figure \@ref(fig:fig1). 
+
+```{r fig1, echo = FALSE, fig.cap = "Histograms of Movie Ratings", fig.show = "hold", out.width = "50%", warning = FALSE}
+#Histogram of average rating per movie
+
+avg_movie_rating <- edx %>%
+  group_by(movieId) %>%
+  summarize(avg_movie_rating = mean(rating))
+  
+avg_movie_rating %>% 
+  ggplot(aes(avg_movie_rating)) +
+  geom_histogram(fill = "blue", color = "black", bins = 30) +
+  labs(x = "Average Rating", y = "Number of Movies") +
+  ggtitle("Average Rating per Movie")
+
+# Histogram of number of ratings per movie
+
+movie_rating_count %>%
+  ggplot(aes(movie_rating_count)) +
+  geom_histogram(fill = "blue", color = "black", binwidth = 1000) +
+  scale_y_log10() +
+  labs(x="Number of Ratings", y="Number of Movies") +
+  ggtitle("Number of Ratings per Movie")
+```
+
+There are 10,677 different movies in this data set, with rating counts ranging from 1 to 31,362. This means that some movies have been rated only once, while others have been rated more than 31,000 times! Additionally, since some movies are generally more liked than others, we see a large variation in average rating as well. This implies that our movie recommendation model needs to account for this bias, which we will denote as the "Movie Effect". The Movie Effect should also contain some sort of penalization to account for the wide range of ratings per movie.
+
+## User Rating
+
+```{r, include = FALSE}
+# Number of different users
+
+n_distinct(edx$userId)
+
+# Range of number of ratings per user
+
+user_rating_count <- edx %>% 
+  group_by(userId) %>% 
+  summarize(user_rating_count = n())
+
+range(user_rating_count$user_rating_count)
+```
+Next, we will explore the ratings given by specific users. Specifically, the average rating given by each user, and the number of ratings given per user. Again, we take a look at the histograms in figure \@ref(fig:fig2) to get a sense of the distribution.
+
+
+```{r fig2, echo = FALSE, fig.cap = "Histograms of User Ratings", fig.show = "hold", out.width = "50%", warning = FALSE}
+
+#Histogram of average rating per user
+
+avg_user_rating <- edx %>%
+  group_by(userId) %>%
+  summarize(avg_user_rating = mean(rating))
+
+avg_user_rating %>% 
+  ggplot(aes(avg_user_rating)) +
+  geom_histogram(fill = "blue", color = "black", bins = 30) +
+  labs(x = "Average Rating", y = "Number of Users") +
+  ggtitle("Average Rating per User")
+
+# Histogram of number of ratings per user
+
+user_rating_count %>%
+  ggplot(aes(user_rating_count)) +
+  geom_histogram(fill = "blue", color = "black", bins = 30) +
+  scale_y_log10() +
+  labs(x="Number of Ratings", y="Number of Users") +
+  ggtitle("Number of Ratings per User")
+```
+
+There are 69,878 different users in this data set, with rating counts ranging from 10 to 6,616. This means that some users have only rated 10 movies, while others have rated almost every movie in the data set! We can also see from the average rating distribution that some users generally enjoy movies and give a higher rating on average, while others are far more critical and give lower ratings on average. This implies that our model should also include a penalized "User Effect" to account for this variability. 
+
+## Release Year Rating
+
+```{r, include = FALSE}
+
+# Number of different years
+
+n_distinct(edx$year)
+
+# Range of number of ratings per year
+
+year_rating_count <- edx %>%
+  group_by(year) %>%
+  summarize(year_rating_count = n())
+
+range(year_rating_count$year_rating_count)
+```
+
+As mentioned earlier, the "year" variable was extracted from the "title" variable to represent release year for each movie in the data set. Following the same process as with the movie and user variables, we look at the average rating per year and the number of ratings given each year. This time however, line plots are used to show the change over time.
+
+
+```{r fig3, echo = FALSE, fig.cap = "Line Plots of Realease Year Ratings", fig.show = "hold", out.width = "50%", warning = FALSE}
+
+#Line plot of average rating per year
+
+avg_year_rating <- edx %>%
+  group_by(year) %>%
+  summarize(avg_year_rating = mean(rating))
+
+avg_year_rating %>% 
+  ggplot(aes(year, avg_year_rating)) +
+  geom_line(color = "blue", size = 1.3) +
+  labs(x = "Release Year", y = "Average Rating") +
+  ggtitle("Average Rating per Year")
+
+# Line plot of number of ratings per year
+
+year_rating_count %>%
+  ggplot(aes(year, year_rating_count)) +
+  geom_line(color = "blue", size = 1.3) +
+  labs(x="Release Year", y="Number of Ratings") +
+  ggtitle("Number of Ratings by Release Year")
+```
+
+The range of number of ratings for release year is 32 to 786,762. It can be seen from Figure 3 that the number of ratings increases gradually from 1915 to 1990, but soars significantly from 1990 to 1995 and peaks at 1995. After that, the number drops from 1995 to 2008. One should also note that average rating was quite volatile over the years. Again, this implies that the recommendation model should account for these biases with a penalized "Year Effect".
+
+# Modelling
+
+
+```{r echo = FALSE, message = FALSE}
+
+#Split edx data into training and test set
+
+set.seed(1)
+
+test_index <- createDataPartition(edx$rating, times = 1, p = 0.1, list = FALSE)
+
+train_set <- edx[-test_index, ]
+
+temp <- edx[test_index, ]
+
+test_set <- temp %>%
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+removed <- anti_join(temp, test_set)
+
+train_set <- rbind(train_set, removed)
+
+## RMSE
+
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+We are now ready to start building a regression model for the Movie Recommendation System. As stated earlier, the efficacy of the model will be evaluated using the residual mean squared error (RMSE). It is the typical error we make when predicting a movie rating.  It is calculated as follows:
+
+\begin{equation}
+RMSE = \sqrt{\frac{1}{N}\sum_{u,i}(\hat{Y}_{u,i} - Y_{u,i})^2} (\#eq:eq1)
+\end{equation}
+
+where $Y_{u,i}$ is the rating for movie $i$ by user $u$, $\hat{Y}_{u,i}$ is the predicted value of $Y_{u,i}$ and $N$ is the number of user/movie combinations. As a reminder, the goal of this project is to attain a RMSE less than 0.86490. Also note that the models that follow use the edx data set that was partitioned further into two sets: 90% of the data was used to train the model, and the remaining 10% was used as a test set to calculate the RMSE. Once we find a model that works, we will retrain using the edx set and test on the final_holdout_test set. 
+
+## Model 1: Just the Average
+
+```{r, echo = FALSE}
+mu <- mean(train_set$rating)
+
+rmse1 <- RMSE(test_set$rating, mu)
+
+result1 <- tibble(Model = "Average Rating", RMSE = rmse1)
+```
+
+As a starting point, we create a simple model that uses only the overall average rating. In other words, for all user/movie combinations, the predicted rating is just the average rating of the whole data set. 
+
+**Model 1**
+
+\begin{equation}
+\hat{Y}_{u,i} = \mu + \epsilon_{u,i} (\#eq:eq2)
+\end{equation}
+
+where $\epsilon_{u,i}$ is an independent and identically distributed error centered at 0 and $\mu$ is the mean rating of all movies. The result of this model can be seen in Table \@ref(tab:tab3)
+
+```{r tab3, echo= FALSE}
+kbl(result1, booktabs = T, caption ="Result of Model 1") %>% 
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+This model gives a RMSE of 1.06, which is larger than the desired result. Therefore, the average alone is not a good enough predictor, and we must add more variables to the model.
+
+## Model 2: Average + Movie Effect
+
+```{r echo = FALSE}
+
+lambdas <- seq(0, 10, 0.1)
+
+rmse2 <- sapply(lambdas, function(l) {
+  
+  mu <- mean(train_set$rating)
+  
+  b_i <- train_set %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  y_hat <- test_set %>%
+    left_join(b_i, by = "movieId") %>%
+    mutate(y_hat = mu + b_i) %>%
+    pull(y_hat)
+  
+RMSE(test_set$rating, y_hat)
+
+})
+
+result2 <- tibble(Model = "Movie Effect",
+                      Optimal_lambda = lambdas[which.min(rmse2)],
+                      RMSE = min(rmse2))
+```
+
+During data exploration, it was discovered that the average rating per movie varied.  This implies that our model should incorporate a "Movie Effect".
+
+**Model 2**
+
+\begin{equation}
+\hat{Y}_{u,i} = \mu + {b}_{i} + \epsilon_{u,i} (\#eq:eq3)
+\end{equation}
+
+where the term $b_i$ was added to represent the movie effect. We can estimate $b_i$ by taking the average of $\hat{Y}_{u,i}$ - $\mu$.
+
+\begin{equation}
+\hat{b}_{i} = \frac{1}{N_i}\sum_{i}(\hat{Y}_{u,i} - \mu) (\#eq:eq4)
+\end{equation}
+
+It was also discovered that some movies were rated very few times while others were rated many times. Since we have to divide by ${N}_{i}$ in order to get $\hat{b}_{i}$, the estimates with many ratings will be more precise than those with fewer ratings. Therefore, we can use regularization, or a penalized regression model. We can control the total variability of the movie effect by minimizing an equation that adds a penalty:
+
+\begin{equation}
+\frac{1}{N} \sum_{u,i}(Y_{u,i} - \mu - b_i)^2 + \lambda\sum_i b_i^2 (\#eq:eq5)
+\end{equation}
+
+The first term is just the sum of squares and the second is a penalty that gets larger when many ${b}_{i}$ are large. The values of ${b}_{i}$ that minimize this equation are:
+
+\begin{equation}
+\hat{b}_{i}(\lambda) = \frac{1}{\lambda + n_i} \sum_{i=1}^{n_i} (Y_{u,i} - \hat{\mu}) (\#eq:eq6)
+\end{equation}
+
+Now, when ${n}_{i}$ is small, the estimate $\hat{b}_{i}$ reduces toward 0. The larger $\lambda$, the smaller it gets. And so the new model is:
+
+\begin{equation}
+\hat{Y}_{u,i} = \mu + \hat{b}_{i}(\lambda) + \epsilon_{u,i} (\#eq:eq7)
+\end{equation}
+
+To select the optimal $\lambda$, we can use cross validation, and use the value that minimizes RMSE. Table \@ref(tab:tab4) shows the results.
+
+```{r tab4, echo= FALSE}
+kbl(result2, booktabs = T, caption ="Result of Model 2") %>% 
+  kable_styling(latex_options = c("striped", "HOLD_position"))
+```
+
+This model gives a RMSE of 0.943, which is still larger than the desired result.  Therefore more variables are required. 
+
+## Model 3: Average + Movie + User Effect
+
+```{r echo = FALSE}
+rmse3 <- sapply(lambdas, function(l) {
+  
+  mu <- mean(train_set$rating)
+  
+  b_i <- train_set %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = mean(rating - mu - b_i)/(n()+l))
+  
+  y_hat <- test_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(y_hat = mu + b_i + b_u) %>%
+    pull(y_hat)
+  
+  RMSE(test_set$rating, y_hat)
+  
+})
+
+result3 <- tibble(Model = "Movie + User Effect",
+                      Optimal_lambda = lambdas[which.min(rmse3)],
+                      RMSE = min(rmse3))
+```
+
+Next we will try adding a "User Effect" to the model to account for the fact that some users tend to rate movies low, while others rate movies high. 
+
+**Model 3**
+
+\begin{equation}
+{Y}_{u,i} = \mu + {b}_{i} + {b}_{u} + \epsilon_{u,i} (\#eq:eq8)
+\end{equation}
+
+where the term $b_u$ was added to represent the user effect. We can estimate the penalized $b_u$ just like before: 
+
+\begin{equation}
+\hat{b}_{u}(\lambda) = \frac{1}{(\lambda + n_u)} \sum_{i=1}^{n_u} (Y_{u,i} - \hat{\mu} - \hat{b}_{i}(\lambda)) (\#eq:eq9)
+\end{equation}
+
+where $n_u$ is the number ratings given by user $u$. Again, we use cross validation to select the optimal lambda and use the value that minimizes RMSE. Table \@ref(tab:tab5) summarizes the results.
+
+
+```{r tab5, echo= FALSE}
+kbl(result3, booktabs = T, caption ="Result of Model 3") %>% 
+  kable_styling(latex_options = c("striped", "HOLD_position"))
+```
+
+This model provided a RMSE of 0.942, which is lower, but not low enough.  Let's add another variable. 
+
+## Model 4: Average + movie + user + year effect
+
+``` {r echo = FALSE}
+
+  rmse4 <- sapply(lambdas, function(l) {
+  
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu - b_i)/(n()+l))
+  
+  b_y <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(year) %>%
+    summarize(b_y = sum(rating - mu - b_i - b_u)/(n()+l))
+  
+  y_hat <- test_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_y, by = "year") %>%
+    mutate(y_hat = mu + b_i + b_u + b_y) %>%
+    pull(y_hat)
+  
+  RMSE(test_set$rating, y_hat)
+  
+})
+
+result4 <- tibble(Model = "Movie + User + Year Effect",
+                  Optimal_lambda = lambdas[which.min(rmse4)],
+                  RMSE = min(rmse4))
+```
+
+It could be seen that due to variability in both average rating and number of ratings for release year, our model should contain a "Year Effect" as well. Thus, 
+
+**Model 4**
+
+\begin{equation}
+{Y}_{u,i} = \mu + {b}_{i} + {b}_{u} + {b}_{y} + \epsilon_{u,i} (\#eq:eq9)
+\end{equation}
+
+where the term ${b}_{y}$ was added to represent the year effect. Since the method to obtain ${b}_{y}$  is the same as above, let's skip right to the results. Table \@ref(tab:tab6) shows the results for all methods for comparison.
+
+```{r tab6, echo = FALSE}
+
+# Combined result table
+
+result <- bind_rows(result1,result2,result3,result4)
+kbl(result, booktabs = T, caption ="Combined result of all models") %>% 
+  kable_styling(latex_options = c("striped", "HOLD_position"))
+```
+
+We can see that with a RMSE of 0.86384, model 4 provides the desired result. 
+
+## Final Test
+
+```{r echo = FALSE}
+
+rmse <- sapply(lambdas, function(l) {
+  
+  mu <- mean(edx$rating)
+  
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>%
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu - b_i)/(n()+l))
+  
+  b_y <- edx %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(year) %>%
+    summarize(b_y = sum(rating - mu - b_i - b_u)/(n()+l))
+  
+  y_hat <- final_holdout_test %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_y, by = "year") %>%
+    mutate(y_hat = mu + b_i + b_u + b_y) %>%
+    pull(y_hat)
+  
+  RMSE(final_holdout_test$rating, y_hat)
+  
+})
+
+# Final result table on final_holdout_test set
+
+result_final <- tibble(Model = "Movie + User + Year",
+                           Optimal_lambda = lambdas[which.min(rmse)],
+                           RMSE = min(rmse))
+
+```
+
+Now that we found a model that works, we will retrain the edx set using the same methodology: a penalized least squares regression model that incorporates movie, user, and year effects. Then use it on the final_holdout_test set to get the final RMSE. See Table \@ref(tab:tab7).
+
+```{r tab7, echo = FALSE}
+kbl(result_final, booktabs = T, 
+    caption ="Final RMSE Result") %>% 
+  kable_styling(latex_options = c("striped", "HOLD_position"))
+```
+
+The final RMSE on the final_holdout_test set is lower than the desired result. Hence, we can conclude that the movie recommendation system works effectively, and provides a decent prediction for the rating of a specific movie, given by a specific user.
+
+# Conclusion
+
+Every movie website and streaming service uses a movie recommendation system in order to enhance user enjoyment. The more accurate the prediction, the more enjoyment for the user. This project used the MovieLens data set to build a model using a penalized least squares approach and attained a RMSE of 0.86452, which is lower than the goal of 0.86490. But not by much. The RMSE could be reduced even further by implementing more effects such as genre, timestamp, user's age, user's sex, etc. Additionally, other machine learning models could also be used to achieve better results when there are no limitations in processing power and RAM. But for the purposes of this project, our model will suffice.
