@@ -1,2 +1,2 @@
 # MovieLens-Project
-Capstone project for HarvardX Data Science Prfessional Certificatate
+Capstone project for HarvardX Data Science Professional Certificatate
